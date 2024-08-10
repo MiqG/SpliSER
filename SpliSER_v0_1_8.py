@@ -6,9 +6,11 @@ version = "v0.1.8"
 import sys
 import timeit
 import time
+from tqdm import tqdm
 import subprocess
 import argparse
 import HTSeq
+import pysam
 import re
 from operator import truediv
 from Gene_Site_Iter_Graph_v0_1_8 import Gene, Site, Iter, Graph
@@ -683,17 +685,18 @@ def processSites(inBAM, qChrom, isStranded, strandedType,isbeta2Cryptic, sample 
 	for c in chrom_index:
 		print("Processing region "+str(c))
 		if qChrom == c or qChrom =="All":
-			for idx, site in enumerate(site2D_array[chrom_index.index(c)]):
+			for idx, site in enumerate(tqdm(site2D_array[chrom_index.index(c)], desc="checkBam")):
 				#Go assign Beta 1 type reads from BAM file
 				checkBam(inBAM, site, sample, isStranded, strandedType)
 			#Once this is done for all sites, we can calculate SSE
-			for idx, site in enumerate(site2D_array[chrom_index.index(c)]):
+			for idx, site in enumerate(tqdm(site2D_array[chrom_index.index(c)], desc="beta&sse")):
 				findBeta2Counts(site, numsamples)
 				calculateSSE(site,isbeta2Cryptic)
 
 
 def process(inBAM, inBed, outputPath, qGene, qChrom, maxIntronSize, annotationFile,aType, isStranded, strandedType, isbeta2Cryptic):
 	print('Processing')
+	inBAM = pysam.Samfile(inBAM)
 	if isStranded:
 		print('Stranded Analysis {}'.format(strandedType))
 	else:
@@ -753,7 +756,7 @@ def combine(samplesFile, outputPath,qGene, isStranded, strandedType, isbeta2Cryp
 			samples +=1
 			allTitles.append(values[0]) # record the sample moniker
 			bedPaths.append(values[1]) # record the bed file paths
-			BAMPaths.append(values[2].rstrip()) # record BAM file paths
+			BAMPaths.append(pysam.Samfile(values[2].rstrip())) # record BAM file paths
 		elif len(values) >= 0:
 			print(str(allTitles), str(bedPaths), str(BAMPaths))
 			raise Exception('Samples File contains lines that do not have exactly 3 tab-separated columns')
