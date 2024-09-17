@@ -747,116 +747,315 @@ def outputCombinedLines(outTSV, site, gene, isbeta2Cryptic, allTitles):
         outTSV.write(str(site.getPartnerCount(idx))+"\t")
         outTSV.write(str(site.getCompetitorPos())+"\n")
         
+def skip_to_chrom(iterator, chrom):
+    for line in iterator:
+        vals = line.rstrip().split("\t")
+        line_chrom = vals[0]
+        if line_chrom==chrom:            
+            # Once we find chrom, yield the line and break from the skipping loop
+            yield line
+            break
+            
+    # After finding chrom, yield the rest of the lines in the iterator
+    # that match the chromosome (assuming chromosomes are sorted)
+    for line in iterator:
+        vals = line.rstrip().split("\t")
+        line_chrom = vals[0]
+        if line_chrom == chrom:
+            yield line
+        else:
+            # Stop yielding if a different chromosome is encountered
+            break
+        
+        
+def process_chromosome(chrom_oi, bedPaths, bam_paths, samples, isStranded, strandedType, isbeta2Cryptic, qGene, temp_dir, allTitles):
+    print(f"Started combining sites in chromosome {chrom_oi}...")
 
-def process_chromosome(chrom, bedPaths, bam_paths, samples, isStranded, strandedType, isbeta2Cryptic, qGene, temp_dir, allTitles):
-    print(f"Started combining sites in chromosome {chrom}...")
-
-    currentChrom = chrom
-    sSite = None
-    assocGene = ""
-    partners = []
-    competitors = []
-    filledCount = 0
-    sites_processed = 0  # Counter for the number of sites processed
-
+    # Open the BAM files
     try:
-        # Open the BAM files
         bams = [pysam.AlignmentFile(bam_path, "rb") for bam_path in bam_paths]
-        print(f"Opening BAM files for chromosome {chrom} was successful.")
+        print(f"Opening BAM files for chromosome {chrom_oi} was successful.")
     except Exception as e:
-        print(f"Error opening BAM files for chromosome {chrom}: {e}")
+        print(f"Error opening BAM files for chromosome {chrom_oi}: {e}")
         return 0, None  # Return zero count and None path if error occurs
-
+    
+    # Open Spliser processed files (BED-like files)
+    try:
+        bed_iters = []
+        
+        # make a bed file line generator for each bed file
+        for file in bedPaths:
+            bed_iters.append((open(file, 'r')))
+        
+        # skip lines in iterators until we find the chromosome of interest
+        bed_iters = [skip_to_chrom(bed_iter, chrom_oi) for bed_iter in bed_iters]
+            
+        print(f"Opening Spliser-processed files for chromosome {chrom_oi} was successful.")
+        
+    except Exception as e:
+        print(f"Error opening Spliser-processed files for chromosome {chrom_oi}: {e}")
+        return 0, None  # Return zero count and None path if error occurs        
+    
     currentVals = [[''] * 11] * samples
-    iterGo = [True] * samples
-    iterDone = [False] * samples
+    # currentChromPos = 0 # we are processing a single chromosome
+    # maxChromPos = len(chromsInOrder)-1 # requires input
+    currentChrom = chrom_oi # original: currentChrom = chromsInOrder[currentChromPos]
     lowestPos = -1
     lowestPosStrand = "?"
+    assocGene = "" # to store the gene with the lowestPos
     chroms = [''] * samples
-
+    iterGo = [True] * samples
+    iterDone = [False] * samples
+        
     # Create a temporary file for this chromosome
-    temp_file_path = os.path.join(temp_dir, f"{chrom}.tmp")
+    temp_file_path = os.path.join(temp_dir, f"{chrom_oi}.tmp")
     with open(temp_file_path, 'w') as temp_file:
-        while not (len(set(iterDone)) <= 1 and iterDone[0]):
+        # load up initial values
+        count = 0
+        filledCount = 0
+        
+        print(f"Combining data for site# {count} in {currentChrom}...")
+        
+        # stop if all Spliser process BAM-like files are done iterating
+        # for the selected chromosome
+        while not ((len(set(iterDone))<=1) and (iterDone[0]==True)):
+            # refresh values
+            sSite = None
+            assocGene = ""
+            partners = []
+            competitors = []
             filledGap = False
-
-            for idx, bed_path in enumerate(bedPaths):
-                if not iterDone[idx]:
-                    if iterGo[idx]:
+            
+            for idx, bed_iter in enumerate(bed_iters):
+                # unless we have run out of lines for this file, 
+                # get the values for this file
+                if iterDone[idx]==False:
+                    # Get the next value for appropriate iters
+                    if iterGo[idx]==True:
+                        # ? is the first line of the chromosome being processed?
+                        nextLine = next(bed_iter, None)
+                        
+                        # on which chromosome are we?
                         try:
-                            with open(bed_path, 'r') as bed_file:
-                                # skip lines that do not contain the current chromosome
-                                for line in bed_file:
-                                    vals = line.rstrip().split("\t")
-                                    chroms[idx] = vals[0]
-                                    if chroms[idx] == currentChrom:
-                                        currentVals[idx] = vals
-                                        iterGo[idx] = False
-                                        break
-                                else: 
-                                    # This else corresponds to the for loop
-                                    # it will execute only if the for loop does not
-                                    # encounter a break statement
-                                    iterDone[idx] = True
-                                    chroms[idx] = None
-                                    
-                        except Exception as e:
-                            print(f"Error reading BED file for chromosome {chrom}: {e}")
+                            chrom_line = nextLine.rstrip().split("\t")[0]
+                        except:
+                            chrom_line = None
+                        
+                        if (nextLine is not None) & (chrom_line==chrom_oi):
+                            # we are still on the chromosome of interest
+                            
+                            # get line values
+                            currentVals[idx] = nextLine.rstrip().split("\t")
+                            
+                            # update chroms seen this round
+                            chroms[idx] = currentVals[idx][0]
+                            
+                            # pause iterator until we know this value was used
+                            iterGo[idx] = False
+                        else:
+                            # we are not in the chromosome of interest anymore
+                            # the iterator is done
                             iterDone[idx] = True
+                            
+                            # set chrom to None to ignore this file in 
+                            # currentChrom equation
                             chroms[idx] = None
-
-                    if chroms[idx] == currentChrom:
+                            
+                    # check position (if on current chrom)
+                    # record if it is the lowest we have seen so far
+                    if chroms[idx]==currentChrom:
                         pos = int(currentVals[idx][1])
                         strand = currentVals[idx][2]
-                        if pos < lowestPos or lowestPos == -1 or (isStranded and pos == lowestPos and strand == "+"):
+                        
+                        # check if this is a new lowest position
+                        if (pos<lowestPos) or (lowestPos==-1) or (isStranded==True and pos==lowestPos and strand=="+"):
                             lowestPos = int(pos)
                             lowestPosStrand = strand
                             assocGene = currentVals[idx][3]
-                            
-            if not (len(set(iterDone)) <= 1 and iterDone[0]):
+            
+            # if we did not exhaust all iterators we move on
+            if not ((len(set(iterDone))<=1) and (iterDone[0]==True)):
+                # create a splice site for lowestPos
                 sSite = makeSingleSpliceSite(currentChrom, lowestPos, samples, '', isStranded)
-
-                chromsCheck = [i for i in chroms if i == currentChrom]
-                if len(chromsCheck) == 0:
-                    print(f"{chrom}|No more data")
-                    break  # No more data for this chromosome
+                chromsCheck = [i for i in chroms if i==currentChrom]
+                
+                if len(chromsCheck)==0:
+                    # we have exhausted the current region
+                    # ? I think this will never run in the current implementation
+                    # as we update iterDone[idx]=True when we find another chromosome
+                    currentChromPos = currentChromPos + 1
+                    if currentChromPos>maxChromPos:
+                        currentChrom = None
+                    else:
+                        currentChrom = chromsInOrder[currentChromPos]
+                        count = 0
+                        print(f"Combining data for site# {count} in {currentChrom}...")
+            
                 else:
+                    # we are still adding new values
                     for idx, vals in enumerate(currentVals):
-                        if vals[0] == currentChrom and int(vals[1]) == lowestPos and not iterDone[idx] and (not isStranded or vals[2] == lowestPosStrand):
+                        # add values to SpliceSite Object
+                        has_chrom = (vals[0]==currentChrom)
+                        has_pos = (int(vals[1])==lowestPos)
+                        not_done_iter = (iterDone[idx]==False)
+                        not_stranded = (isStranded==False)
+                        same_strand = (vals[2]==lowestPosStrand)
+                        if (has_chrom and has_pos and not_done_iter and (not_stranded or same_strand)):
+                            # this sample has values for the splice site
+                            # (and if it's a stranded analysis we are looking at the same strand)
+                            
+                            # if we take values from this file, we want to get 
+                            # a new line next time
                             iterGo[idx] = True
+                            
+                            # add details for splice sites
+                            ## set the strand
                             sSite.setStrand(str(vals[2]))
+                            
+                            ## add alpha counts
                             sSite.addAlphaCount(int(vals[5]), idx)
+                            
+                            ## add beta1 counts
                             sSite.addBeta1Count(int(vals[6]), idx)
+                            
+                            ## add beta2Simple counts
                             sSite.addBeta2SimpleCount(int(vals[7]), idx)
-                            if vals[8] != "NA":
+                            
+                            if vals[8]!= "NA": # (if available)
+                                ## add beta2Cryptic counts
                                 sSite.addBeta2CrypticCount(int(vals[8]), idx)
+                                
+                                ## add beta2WeightedCounts
                                 sSite.addBeta2Weighted(float(vals[9]), idx)
+                                
+                            # calculate SSE
                             try:
                                 calculateSSE(sSite, isbeta2Cryptic)
-                            except Exception as exc:
-                                print(f"Error calculating SSE for chromosome {chrom}: {exc}")
+                            except:
+                                print("Could not recalculate SSE. You might be trying to use --beta2Cryptic flag without using it in the process step")
+                                
+                            # read partner counts as a dictionary and 
+                            # update the splice site
                             pCounts = literal_eval(str(vals[10]))
                             for key, val in pCounts.items():
                                 partners.append(key)
                                 sSite.addPartnerCount(key, val, idx)
+                            
+                            # read competitor positions as list and add
+                            # to the splice site
                             cPosList = literal_eval(str(vals[11]))
                             for c in cPosList:
                                 competitors.append(c)
                                 sSite.addCompetitorPos(c)
+                                
                         else:
-                            if qGene == 'All' or qGene == assocGene:
+                            # this sample does not have values for the splice site
+                            # find beta1 and beta2Simple counts for the site,
+                            # using partners and competitors
+                            if (qGene=="All") or (qGene==assocGene):
                                 filledGap = True
                                 checkBam(bams[idx], sSite, idx, isStranded, strandedType)
                                 sSite.setSSE(0.000, idx)
-                    if qGene == 'All' or qGene == assocGene:
+                    
+                    if (qGene=="All") or (qGene==assocGene):
                         outputCombinedLines(temp_file, sSite, assocGene, isbeta2Cryptic, allTitles)
-
+                        
+                # reset the lowestPos counter
                 lowestPos = -1
-                sites_processed += 1  # Increment the counter
+                
+            if filledGap:
+                filledCount += 1
+                
+            count += 1
+            if count%10000==0:
+                print(f"Combining data for site# {count} in {currentChrom}...")
+                
+        # loop back to while loop
+        print(f"Filled in Beta read counts for {filledCount} Sites not detected in some samples")
+        # end of reproducing repo                    
+                        
+    #             for idx, bed_path in enumerate(bedPaths):
+    #                 if not iterDone[idx]: # read new line unless we have finished
+    #                     if iterGo[idx]: # get the new line
+    #                         try:
+    #                             # open the bed file
+    #                             with open(bed_path, 'r') as bed_file:
+    #                                 # skip lines that do not contain the current chromosome
+    #                                 for line in bed_file:
+    #                                     vals = line.rstrip().split("\t")
+    #                                     chroms[idx] = vals[0]
+    #                                     # save line when we are in the current chromosome
+    #                                     if chroms[idx] == currentChrom:
+    #                                         currentVals[idx] = vals
+    #                                         iterGo[idx] = False
+    #                                         break
+    #                                         # this will save the first line of the chromosome
+    #                                         # for each bed file
+    #                                 else: 
+    #                                     # This else corresponds to the for loop
+    #                                     # it will execute only if the for loop does not
+    #                                     # encounter a break statement
+    #                                     iterDone[idx] = True
+    #                                     chroms[idx] = None
 
-    print(f"Finished combining sites in chromosome {chrom}. Processed {sites_processed} sites.")
+    #                         except Exception as e:
+    #                             print(f"Error reading BED file for chromosome {chrom}: {e}")
+    #                             iterDone[idx] = True
+    #                             chroms[idx] = None
+
+    #                     if chroms[idx] == currentChrom:
+    #                         pos = int(currentVals[idx][1])
+    #                         strand = currentVals[idx][2]
+    #                         if pos < lowestPos or lowestPos == -1 or (isStranded and pos == lowestPos and strand == "+"):
+    #                             lowestPos = int(pos)
+    #                             lowestPosStrand = strand
+    #                             assocGene = currentVals[idx][3]
+
+    #             if not (len(set(iterDone)) <= 1 and iterDone[0]):
+    #                 sSite = makeSingleSpliceSite(currentChrom, lowestPos, samples, '', isStranded)
+
+    #                 chromsCheck = [i for i in chroms if i == currentChrom]
+    #                 if len(chromsCheck) == 0:
+    #                     print(f"{chrom}|No more data")
+    #                     break  # No more data for this chromosome
+    #                 else:
+    #                     for idx, vals in enumerate(currentVals):
+    #                         if vals[0] == currentChrom and int(vals[1]) == lowestPos and not iterDone[idx] and (not isStranded or vals[2] == lowestPosStrand):
+    #                             iterGo[idx] = True
+    #                             sSite.setStrand(str(vals[2]))
+    #                             sSite.addAlphaCount(int(vals[5]), idx)
+    #                             sSite.addBeta1Count(int(vals[6]), idx)
+    #                             sSite.addBeta2SimpleCount(int(vals[7]), idx)
+    #                             if vals[8] != "NA":
+    #                                 sSite.addBeta2CrypticCount(int(vals[8]), idx)
+    #                                 sSite.addBeta2Weighted(float(vals[9]), idx)
+    #                             try:
+    #                                 calculateSSE(sSite, isbeta2Cryptic)
+    #                             except Exception as exc:
+    #                                 print(f"Error calculating SSE for chromosome {chrom}: {exc}")
+    #                             pCounts = literal_eval(str(vals[10]))
+    #                             for key, val in pCounts.items():
+    #                                 partners.append(key)
+    #                                 sSite.addPartnerCount(key, val, idx)
+    #                             cPosList = literal_eval(str(vals[11]))
+    #                             for c in cPosList:
+    #                                 competitors.append(c)
+    #                                 sSite.addCompetitorPos(c)
+    #                         else:
+    #                             if qGene == 'All' or qGene == assocGene:
+    #                                 filledGap = True
+    #                                 checkBam(bams[idx], sSite, idx, isStranded, strandedType)
+    #                                 sSite.setSSE(0.000, idx)
+    #                     if qGene == 'All' or qGene == assocGene:
+    #                         outputCombinedLines(temp_file, sSite, assocGene, isbeta2Cryptic, allTitles)
+
+    #                 lowestPos = -1
+    #                 sites_processed += 1  # Increment the counter
+
+    #     print(f"Finished combining sites in chromosome {chrom}. Processed {sites_processed} sites.")
 
     return filledCount, temp_file_path
+
 
 def combine(samplesFile, outputPath, qGene, isStranded, strandedType, isbeta2Cryptic, n_jobs):
     print('Combining samples...')
@@ -918,8 +1117,8 @@ def combine(samplesFile, outputPath, qGene, isStranded, strandedType, isbeta2Cry
         # Use joblib.Parallel with delayed
         results = Parallel(n_jobs=n_jobs)(
             delayed(process_chromosome)(
-                chrom, bedPaths, bam_paths, samples, isStranded, strandedType, isbeta2Cryptic, qGene, temp_dir, allTitles
-            ) for chrom in chromsInOrder
+                chrom_oi, bedPaths, bam_paths, samples, isStranded, strandedType, isbeta2Cryptic, qGene, temp_dir, allTitles
+            ) for chrom_oi in chromsInOrder
         )
         
         # Combine the temporary files into the final output file
@@ -933,6 +1132,7 @@ def combine(samplesFile, outputPath, qGene, isStranded, strandedType, isbeta2Cry
                     shutil.copyfileobj(temp_file, outTSV)  # Efficiently append the file content
 
         print('Filled in Beta read counts for {} Sites not detected in some samples'.format(filledCount))
+        
            
 def combineShallow(samplesFile, outputPath, qGene, isStranded, minSamples, minReads, minSSE, strandedType, isbeta2Cryptic):
     print('Combining samples...')
